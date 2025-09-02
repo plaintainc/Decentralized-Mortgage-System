@@ -48,6 +48,19 @@
     })
 )
 
+(define-map borrower-ratings
+    principal
+    {
+        score: uint,
+        total-loans: uint,
+        completed-loans: uint,
+        defaulted-loans: uint,
+        total-payments: uint,
+        on-time-payments: uint,
+        last-updated: uint,
+    }
+)
+
 (define-public (create-mortgage-request
         (amount uint)
         (interest-rate uint)
@@ -175,6 +188,9 @@
                         ))
                 )
 
+                (unwrap! (update-borrower-rating tx-sender true)
+                    err-invalid-params
+                )
                 (ok true)
             )
         )
@@ -207,6 +223,10 @@
             )))
 
             (map-set loans loan-id (merge loan { status: "defaulted" }))
+
+            (unwrap! (update-borrower-rating (get borrower loan) false)
+                err-invalid-params
+            )
 
             (let ((current-payments (default-to (list) (map-get? loan-payments loan-id))))
                 (map-set loan-payments loan-id
@@ -336,4 +356,100 @@
         )
         u0
     )
+)
+
+(define-private (update-borrower-rating
+        (borrower principal)
+        (is-positive bool)
+    )
+    (let ((current-rating (default-to {
+            score: u500,
+            total-loans: u0,
+            completed-loans: u0,
+            defaulted-loans: u0,
+            total-payments: u0,
+            on-time-payments: u0,
+            last-updated: u0,
+        }
+            (map-get? borrower-ratings borrower)
+        )))
+        (let ((new-score (calculate-new-score current-rating is-positive)))
+            (map-set borrower-ratings borrower
+                (merge current-rating {
+                    score: new-score,
+                    total-payments: (+ (get total-payments current-rating) u1),
+                    on-time-payments: (+ (get on-time-payments current-rating)
+                        (if is-positive
+                            u1
+                            u0
+                        )),
+                    completed-loans: (+ (get completed-loans current-rating)
+                        (if (and is-positive (> (get total-payments current-rating) u0))
+                            u1
+                            u0
+                        )),
+                    defaulted-loans: (+ (get defaulted-loans current-rating)
+                        (if (not is-positive)
+                            u1
+                            u0
+                        )),
+                    last-updated: stacks-block-height,
+                })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-private (calculate-new-score
+        (rating {
+            score: uint,
+            total-loans: uint,
+            completed-loans: uint,
+            defaulted-loans: uint,
+            total-payments: uint,
+            on-time-payments: uint,
+            last-updated: uint,
+        })
+        (is-positive bool)
+    )
+    (let (
+            (current-score (get score rating))
+            (payment-ratio (if (is-eq (get total-payments rating) u0)
+                u100
+                (/ (* (get on-time-payments rating) u100)
+                    (get total-payments rating)
+                )
+            ))
+            (default-ratio (if (is-eq (get total-loans rating) u0)
+                u0
+                (/ (* (get defaulted-loans rating) u100) (get total-loans rating))
+            ))
+        )
+        (if is-positive
+            (if (> (+ current-score u5) u1000)
+                u1000
+                (+ current-score u5)
+            )
+            (if (< (- current-score u50) u100)
+                u100
+                (- current-score u50)
+            )
+        )
+    )
+)
+
+(define-read-only (get-borrower-rating (borrower principal))
+    (map-get? borrower-ratings borrower)
+)
+
+(define-read-only (get-borrower-score (borrower principal))
+    (match (map-get? borrower-ratings borrower)
+        rating (get score rating)
+        u500
+    )
+)
+
+(define-read-only (is-borrower-high-risk (borrower principal))
+    (< (get-borrower-score borrower) u300)
 )
