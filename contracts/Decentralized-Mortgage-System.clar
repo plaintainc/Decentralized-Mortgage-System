@@ -8,6 +8,8 @@
 (define-constant err-loan-not-active (err u106))
 (define-constant err-loan-defaulted (err u107))
 (define-constant err-payment-overdue (err u108))
+(define-constant err-escrow-insufficient (err u109))
+(define-constant err-escrow-overpayment (err u110))
 
 (define-data-var next-loan-id uint u1)
 (define-data-var total-loans uint u0)
@@ -59,6 +61,29 @@
         on-time-payments: uint,
         last-updated: uint,
     }
+)
+
+;; Loan Interest Escrow System
+(define-map loan-escrow
+    uint ;; loan-id
+    {
+        balance: uint,
+        total-deposited: uint,
+        total-withdrawn: uint,
+        auto-pay-enabled: bool,
+        min-balance-threshold: uint,
+        last-activity-block: uint,
+    }
+)
+
+(define-map escrow-transactions
+    uint ;; loan-id
+    (list 200 {
+        amount: uint,
+        block: uint,
+        transaction-type: (string-ascii 10), ;; "deposit" or "withdraw"
+        remaining-balance: uint,
+    })
 )
 
 (define-public (create-mortgage-request
@@ -272,6 +297,251 @@
     )
 )
 
+;; Loan Interest Escrow System Functions
+
+(define-public (deposit-to-escrow
+        (loan-id uint)
+        (amount uint)
+    )
+    (let ((loan (unwrap! (map-get? loans loan-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get borrower loan)) err-unauthorized)
+        (asserts!
+            (or 
+                (is-eq (get status loan) "active")
+                (is-eq (get status loan) "pending")
+            )
+            err-loan-not-active
+        )
+        (asserts! (> amount u0) err-invalid-amount)
+        (asserts! (>= (stx-get-balance tx-sender) amount) err-insufficient-funds)
+
+        ;; Transfer funds to contract escrow
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+
+        ;; Update escrow balance
+        (let ((current-escrow (default-to {
+                    balance: u0,
+                    total-deposited: u0,
+                    total-withdrawn: u0,
+                    auto-pay-enabled: false,
+                    min-balance-threshold: u0,
+                    last-activity-block: u0,
+                }
+                (map-get? loan-escrow loan-id)
+            )))
+            (let ((new-balance (+ (get balance current-escrow) amount)))
+                (map-set loan-escrow loan-id
+                    (merge current-escrow {
+                        balance: new-balance,
+                        total-deposited: (+ (get total-deposited current-escrow) amount),
+                        last-activity-block: stacks-block-height,
+                    })
+                )
+
+                ;; Record transaction
+                (let ((current-transactions (default-to (list)
+                        (map-get? escrow-transactions loan-id)
+                    )))
+                    (map-set escrow-transactions loan-id
+                        (unwrap!
+                            (as-max-len?
+                                (append current-transactions {
+                                    amount: amount,
+                                    block: stacks-block-height,
+                                    transaction-type: "deposit",
+                                    remaining-balance: new-balance,
+                                })
+                                u200
+                            )
+                            err-invalid-params
+                        )
+                    )
+                )
+
+                (ok new-balance)
+            )
+        )
+    )
+)
+
+(define-public (withdraw-from-escrow
+        (loan-id uint)
+        (amount uint)
+    )
+    (let ((loan (unwrap! (map-get? loans loan-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get borrower loan)) err-unauthorized)
+        (let ((current-escrow (unwrap! (map-get? loan-escrow loan-id) err-not-found)))
+            (asserts! (>= (get balance current-escrow) amount) err-escrow-insufficient)
+            (asserts! (> amount u0) err-invalid-amount)
+
+            ;; Transfer funds back to borrower
+            (try! (as-contract (stx-transfer? amount tx-sender (get borrower loan))))
+
+            ;; Update escrow balance
+            (let ((new-balance (- (get balance current-escrow) amount)))
+                (map-set loan-escrow loan-id
+                    (merge current-escrow {
+                        balance: new-balance,
+                        total-withdrawn: (+ (get total-withdrawn current-escrow) amount),
+                        last-activity-block: stacks-block-height,
+                    })
+                )
+
+                ;; Record transaction
+                (let ((current-transactions (default-to (list)
+                        (map-get? escrow-transactions loan-id)
+                    )))
+                    (map-set escrow-transactions loan-id
+                        (unwrap!
+                            (as-max-len?
+                                (append current-transactions {
+                                    amount: amount,
+                                    block: stacks-block-height,
+                                    transaction-type: "withdraw",
+                                    remaining-balance: new-balance,
+                                })
+                                u200
+                            )
+                            err-invalid-params
+                        )
+                    )
+                )
+
+                (ok new-balance)
+            )
+        )
+    )
+)
+
+(define-public (enable-auto-pay
+        (loan-id uint)
+        (min-threshold uint)
+    )
+    (let ((loan (unwrap! (map-get? loans loan-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get borrower loan)) err-unauthorized)
+        (asserts! (is-eq (get status loan) "active") err-loan-not-active)
+
+        (let ((current-escrow (default-to {
+                    balance: u0,
+                    total-deposited: u0,
+                    total-withdrawn: u0,
+                    auto-pay-enabled: false,
+                    min-balance-threshold: u0,
+                    last-activity-block: u0,
+                }
+                (map-get? loan-escrow loan-id)
+            )))
+            (map-set loan-escrow loan-id
+                (merge current-escrow {
+                    auto-pay-enabled: true,
+                    min-balance-threshold: min-threshold,
+                    last-activity-block: stacks-block-height,
+                })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (disable-auto-pay (loan-id uint))
+    (let ((loan (unwrap! (map-get? loans loan-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get borrower loan)) err-unauthorized)
+
+        (let ((current-escrow (unwrap! (map-get? loan-escrow loan-id) err-not-found)))
+            (map-set loan-escrow loan-id
+                (merge current-escrow {
+                    auto-pay-enabled: false,
+                    min-balance-threshold: u0,
+                    last-activity-block: stacks-block-height,
+                })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (make-escrow-payment (loan-id uint))
+    (let ((loan (unwrap! (map-get? loans loan-id) err-not-found)))
+        (asserts! (is-eq (get status loan) "active") err-loan-not-active)
+        (let ((lender (unwrap! (get lender loan) err-not-found))
+              (escrow (unwrap! (map-get? loan-escrow loan-id) err-not-found))
+              (payment-amount (get monthly-payment loan)))
+            (asserts! (get auto-pay-enabled escrow) err-invalid-params)
+            (asserts! (>= (get balance escrow) payment-amount) err-escrow-insufficient)
+
+            ;; Transfer payment from escrow to lender
+            (try! (as-contract (stx-transfer? payment-amount tx-sender lender)))
+
+            ;; Update escrow balance
+            (let ((new-balance (- (get balance escrow) payment-amount)))
+                (map-set loan-escrow loan-id
+                    (merge escrow {
+                        balance: new-balance,
+                        total-withdrawn: (+ (get total-withdrawn escrow) payment-amount),
+                        last-activity-block: stacks-block-height,
+                    })
+                )
+
+                ;; Update loan payment status
+                (let ((new-payments (+ (get payments-made loan) u1)))
+                    (map-set loans loan-id
+                        (merge loan {
+                            payments-made: new-payments,
+                            last-payment-block: (some stacks-block-height),
+                            status: (if (>= new-payments (/ (get term-blocks loan) u30))
+                                "completed"
+                                "active"
+                            ),
+                        })
+                    )
+
+                    ;; Record payment transaction
+                    (let ((current-payments (default-to (list) (map-get? loan-payments loan-id))))
+                        (map-set loan-payments loan-id
+                            (unwrap!
+                                (as-max-len?
+                                    (append current-payments {
+                                        amount: payment-amount,
+                                        block: stacks-block-height,
+                                        type: "escrow-payment",
+                                    })
+                                    u100
+                                )
+                                err-invalid-params
+                            ))
+                    )
+
+                    ;; Record escrow transaction
+                    (let ((current-escrow-transactions (default-to (list)
+                            (map-get? escrow-transactions loan-id)
+                        )))
+                        (map-set escrow-transactions loan-id
+                            (unwrap!
+                                (as-max-len?
+                                    (append current-escrow-transactions {
+                                        amount: payment-amount,
+                                        block: stacks-block-height,
+                                        transaction-type: "withdraw",
+                                        remaining-balance: new-balance,
+                                    })
+                                    u200
+                                )
+                                err-invalid-params
+                            )
+                        )
+                    )
+
+                    ;; Update borrower rating
+                    (unwrap! (update-borrower-rating (get borrower loan) true)
+                        err-invalid-params
+                    )
+                    (ok new-balance)
+                )
+            )
+        )
+    )
+)
+
 (define-read-only (get-loan (loan-id uint))
     (map-get? loans loan-id)
 )
@@ -452,4 +722,80 @@
 
 (define-read-only (is-borrower-high-risk (borrower principal))
     (< (get-borrower-score borrower) u300)
+)
+
+;; Escrow System Read-Only Functions
+
+(define-read-only (get-escrow-balance (loan-id uint))
+    (match (map-get? loan-escrow loan-id)
+        escrow (get balance escrow)
+        u0
+    )
+)
+
+(define-read-only (get-escrow-details (loan-id uint))
+    (map-get? loan-escrow loan-id)
+)
+
+(define-read-only (get-escrow-transactions (loan-id uint))
+    (map-get? escrow-transactions loan-id)
+)
+
+(define-read-only (is-auto-pay-enabled (loan-id uint))
+    (match (map-get? loan-escrow loan-id)
+        escrow (get auto-pay-enabled escrow)
+        false
+    )
+)
+
+(define-read-only (can-make-escrow-payment (loan-id uint))
+    (match (map-get? loans loan-id)
+        loan (match (map-get? loan-escrow loan-id)
+            escrow (and
+                (is-eq (get status loan) "active")
+                (get auto-pay-enabled escrow)
+                (>= (get balance escrow) (get monthly-payment loan))
+            )
+            false
+        )
+        false
+    )
+)
+
+(define-read-only (calculate-escrow-coverage (loan-id uint))
+    (match (map-get? loans loan-id)
+        loan (match (map-get? loan-escrow loan-id)
+            escrow (let ((monthly-payment (get monthly-payment loan)))
+                (if (is-eq monthly-payment u0)
+                    u0
+                    (/ (get balance escrow) monthly-payment)
+                )
+            )
+            u0
+        )
+        u0
+    )
+)
+
+(define-read-only (get-escrow-activity-summary (loan-id uint))
+    (match (map-get? loan-escrow loan-id)
+        escrow (some {
+            current-balance: (get balance escrow),
+            total-deposited: (get total-deposited escrow),
+            total-withdrawn: (get total-withdrawn escrow),
+            net-position: (- (get total-deposited escrow) (get total-withdrawn escrow)),
+            auto-pay-status: (get auto-pay-enabled escrow),
+            coverage-months: (match (map-get? loans loan-id)
+                loan (let ((monthly-payment (get monthly-payment loan)))
+                    (if (is-eq monthly-payment u0)
+                        u0
+                        (/ (get balance escrow) monthly-payment)
+                    )
+                )
+                u0
+            ),
+            last-activity: (get last-activity-block escrow),
+        })
+        none
+    )
 )
