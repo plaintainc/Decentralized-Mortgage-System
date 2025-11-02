@@ -78,12 +78,15 @@
 
 (define-map escrow-transactions
     uint ;; loan-id
-    (list 200 {
-        amount: uint,
-        block: uint,
-        transaction-type: (string-ascii 10), ;; "deposit" or "withdraw"
-        remaining-balance: uint,
-    })
+    (list
+        200
+        {
+            amount: uint,
+            block: uint,
+            transaction-type: (string-ascii 10), ;; "deposit" or "withdraw"
+            remaining-balance: uint,
+        }
+    )
 )
 
 (define-public (create-mortgage-request
@@ -306,7 +309,7 @@
     (let ((loan (unwrap! (map-get? loans loan-id) err-not-found)))
         (asserts! (is-eq tx-sender (get borrower loan)) err-unauthorized)
         (asserts!
-            (or 
+            (or
                 (is-eq (get status loan) "active")
                 (is-eq (get status loan) "pending")
             )
@@ -320,13 +323,13 @@
 
         ;; Update escrow balance
         (let ((current-escrow (default-to {
-                    balance: u0,
-                    total-deposited: u0,
-                    total-withdrawn: u0,
-                    auto-pay-enabled: false,
-                    min-balance-threshold: u0,
-                    last-activity-block: u0,
-                }
+                balance: u0,
+                total-deposited: u0,
+                total-withdrawn: u0,
+                auto-pay-enabled: false,
+                min-balance-threshold: u0,
+                last-activity-block: u0,
+            }
                 (map-get? loan-escrow loan-id)
             )))
             (let ((new-balance (+ (get balance current-escrow) amount)))
@@ -339,9 +342,7 @@
                 )
 
                 ;; Record transaction
-                (let ((current-transactions (default-to (list)
-                        (map-get? escrow-transactions loan-id)
-                    )))
+                (let ((current-transactions (default-to (list) (map-get? escrow-transactions loan-id))))
                     (map-set escrow-transactions loan-id
                         (unwrap!
                             (as-max-len?
@@ -354,8 +355,7 @@
                                 u200
                             )
                             err-invalid-params
-                        )
-                    )
+                        ))
                 )
 
                 (ok new-balance)
@@ -371,7 +371,9 @@
     (let ((loan (unwrap! (map-get? loans loan-id) err-not-found)))
         (asserts! (is-eq tx-sender (get borrower loan)) err-unauthorized)
         (let ((current-escrow (unwrap! (map-get? loan-escrow loan-id) err-not-found)))
-            (asserts! (>= (get balance current-escrow) amount) err-escrow-insufficient)
+            (asserts! (>= (get balance current-escrow) amount)
+                err-escrow-insufficient
+            )
             (asserts! (> amount u0) err-invalid-amount)
 
             ;; Transfer funds back to borrower
@@ -388,9 +390,7 @@
                 )
 
                 ;; Record transaction
-                (let ((current-transactions (default-to (list)
-                        (map-get? escrow-transactions loan-id)
-                    )))
+                (let ((current-transactions (default-to (list) (map-get? escrow-transactions loan-id))))
                     (map-set escrow-transactions loan-id
                         (unwrap!
                             (as-max-len?
@@ -403,8 +403,7 @@
                                 u200
                             )
                             err-invalid-params
-                        )
-                    )
+                        ))
                 )
 
                 (ok new-balance)
@@ -422,13 +421,13 @@
         (asserts! (is-eq (get status loan) "active") err-loan-not-active)
 
         (let ((current-escrow (default-to {
-                    balance: u0,
-                    total-deposited: u0,
-                    total-withdrawn: u0,
-                    auto-pay-enabled: false,
-                    min-balance-threshold: u0,
-                    last-activity-block: u0,
-                }
+                balance: u0,
+                total-deposited: u0,
+                total-withdrawn: u0,
+                auto-pay-enabled: false,
+                min-balance-threshold: u0,
+                last-activity-block: u0,
+            }
                 (map-get? loan-escrow loan-id)
             )))
             (map-set loan-escrow loan-id
@@ -463,11 +462,15 @@
 (define-public (make-escrow-payment (loan-id uint))
     (let ((loan (unwrap! (map-get? loans loan-id) err-not-found)))
         (asserts! (is-eq (get status loan) "active") err-loan-not-active)
-        (let ((lender (unwrap! (get lender loan) err-not-found))
-              (escrow (unwrap! (map-get? loan-escrow loan-id) err-not-found))
-              (payment-amount (get monthly-payment loan)))
+        (let (
+                (lender (unwrap! (get lender loan) err-not-found))
+                (escrow (unwrap! (map-get? loan-escrow loan-id) err-not-found))
+                (payment-amount (get monthly-payment loan))
+            )
             (asserts! (get auto-pay-enabled escrow) err-invalid-params)
-            (asserts! (>= (get balance escrow) payment-amount) err-escrow-insufficient)
+            (asserts! (>= (get balance escrow) payment-amount)
+                err-escrow-insufficient
+            )
 
             ;; Transfer payment from escrow to lender
             (try! (as-contract (stx-transfer? payment-amount tx-sender lender)))
@@ -512,9 +515,7 @@
                     )
 
                     ;; Record escrow transaction
-                    (let ((current-escrow-transactions (default-to (list)
-                            (map-get? escrow-transactions loan-id)
-                        )))
+                    (let ((current-escrow-transactions (default-to (list) (map-get? escrow-transactions loan-id))))
                         (map-set escrow-transactions loan-id
                             (unwrap!
                                 (as-max-len?
@@ -527,8 +528,7 @@
                                     u200
                                 )
                                 err-invalid-params
-                            )
-                        )
+                            ))
                     )
 
                     ;; Update borrower rating

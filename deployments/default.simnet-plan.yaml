@@ -64,4 +64,9 @@ plan:
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
             path: contracts/Decentralized-Mortgage-System.clar
             clarity-version: 3
+        - emulated-contract-publish:
+            contract-name: delegated-loan-payments
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: contracts/delegated-loan-payments.clar
+            clarity-version: 3
       epoch: "3.1"
